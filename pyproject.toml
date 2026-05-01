@@ -1,0 +1,36 @@
+[project]
+name = "codex-rosetta"
+version = "0.1.0"
+description = "Proxy server converting between OpenAI Responses API and Chat Completions API"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.28.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "sse-starlette>=2.2.0",
+    "structlog>=24.0.0",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5.0.0"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-httpx>=0.35.0",
+    "respx>=0.22.0",
+    "httpx>=0.28.0",
+]
+
+[project.scripts]
+codex-rosetta = "codex_rosetta.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
