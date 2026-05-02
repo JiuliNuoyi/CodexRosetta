@@ -15,17 +15,17 @@ class WebSearchSimulator(BuiltinToolSimulator):
     def convert_to_builtin_output(
         self, function_call_item: dict[str, Any], arguments: dict[str, Any]
     ) -> dict[str, Any]:
-        search_context_size = arguments.get("search_context_size", "medium")
-        filters = arguments.get("filters", {})
-        user_location = arguments.get("user_location", {})
-        
+        query = arguments.get("query", "")
+        queries = [query] if query else []
+        sources = arguments.get("_sources", [])
+
         return {
             "type": "web_search_call",
             "id": generate_item_id("web_search"),
             "action": {
                 "type": "search",
-                "queries": [],
-                "sources": [],
+                "queries": queries,
+                "sources": sources,
             },
             "status": "completed",
         }
@@ -34,8 +34,9 @@ class WebSearchSimulator(BuiltinToolSimulator):
         self, item_id: str, call_id: str, output_index: int, arguments: dict[str, Any]
     ) -> list[dict[str, Any]]:
         ws_id = generate_item_id("web_search")
-        search_context_size = arguments.get("search_context_size", "medium")
-        
+        query = arguments.get("query", "")
+        queries = [query] if query else []
+
         return [
             {
                 "type": "response.web_search_call.in_progress",
@@ -43,7 +44,7 @@ class WebSearchSimulator(BuiltinToolSimulator):
                     "type": "response.web_search_call.in_progress",
                     "id": ws_id,
                     "output_index": output_index,
-                    "action": {"type": "search", "queries": [], "sources": []},
+                    "action": {"type": "search", "queries": queries, "sources": []},
                     "status": "in_progress",
                 },
             },
@@ -53,7 +54,7 @@ class WebSearchSimulator(BuiltinToolSimulator):
                     "type": "response.web_search_call.searching",
                     "id": ws_id,
                     "output_index": output_index,
-                    "action": {"type": "search", "queries": [], "sources": []},
+                    "action": {"type": "search", "queries": queries, "sources": []},
                 },
             },
         ]
@@ -62,7 +63,10 @@ class WebSearchSimulator(BuiltinToolSimulator):
         self, item_id: str, call_id: str, output_index: int, arguments: dict[str, Any]
     ) -> list[dict[str, Any]]:
         ws_id = generate_item_id("web_search")
-        
+        query = arguments.get("query", "")
+        queries = [query] if query else []
+        sources = arguments.get("_sources", [])
+
         return [
             {
                 "type": "response.web_search_call.completed",
@@ -70,7 +74,7 @@ class WebSearchSimulator(BuiltinToolSimulator):
                     "type": "response.web_search_call.completed",
                     "id": ws_id,
                     "output_index": output_index,
-                    "action": {"type": "search", "queries": [], "sources": []},
+                    "action": {"type": "search", "queries": queries, "sources": sources},
                     "status": "completed",
                 },
             },

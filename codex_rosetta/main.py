@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-from codex_rosetta.config import get_settings
+from codex_rosetta.config import Settings, get_settings
 from codex_rosetta.utils.logging import setup_logging, get_logger
 
 
@@ -76,8 +76,30 @@ def create_app() -> FastAPI:
         logger.info("audit_enabled", audit_dir=settings.AUDIT_DIR)
 
     from codex_rosetta.api.router import router
+    from codex_rosetta.api.keys_router import router as keys_router
+    from codex_rosetta.api.settings_router import router as settings_router
+    from codex_rosetta.api.web_router import mount_webui
 
     app.include_router(router)
+    app.include_router(keys_router)
+    app.include_router(settings_router)
+
+    mount_webui(app)
+
+    from codex_rosetta.api.keys_router import get_key_manager
+    key_manager = get_key_manager()
+    active = key_manager.get_active()
+    if active:
+        logger.info("active_key", name=active.name, base_url=active.base_url)
+        from codex_rosetta.api.dependencies import get_upstream_client
+        active_settings = settings.model_copy(update={
+            "UPSTREAM_BASE_URL": active.base_url,
+            "UPSTREAM_API_KEY": active.key,
+            "UPSTREAM_PROVIDER": active.provider,
+        })
+        get_upstream_client(active_settings)
+    else:
+        logger.warning("no_active_key_configured")
 
     return app
 

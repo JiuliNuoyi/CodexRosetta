@@ -90,10 +90,14 @@ class ToolTransformer:
         definitions = {
             "web_search": {
                 "name": make_simulated_function_name("web_search"),
-                "description": "Search the web for information. Simulates the built-in web_search tool.",
+                "description": "Search the web for information. Use this to find up-to-date information on any topic. Call this when you need to look something up online.",
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query string",
+                        },
                         "search_context_size": {
                             "type": "string",
                             "enum": ["low", "medium", "high"],
@@ -119,14 +123,19 @@ class ToolTransformer:
                             },
                         },
                     },
+                    "required": ["query"],
                 },
             },
             "web_search_2025_08_26": {
                 "name": make_simulated_function_name("web_search_2025_08_26"),
-                "description": "Search the web for information. Simulates the built-in web_search tool.",
+                "description": "Search the web for information. Use this to find up-to-date information on any topic. Call this when you need to look something up online.",
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query string",
+                        },
                         "search_context_size": {
                             "type": "string",
                             "enum": ["low", "medium", "high"],
@@ -152,6 +161,7 @@ class ToolTransformer:
                             },
                         },
                     },
+                    "required": ["query"],
                 },
             },
             "file_search": {

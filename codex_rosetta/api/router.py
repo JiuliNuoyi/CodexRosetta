@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -13,11 +14,13 @@ from codex_rosetta.config import get_settings
 from codex_rosetta.converters.request_converter import RequestConverter
 from codex_rosetta.converters.response_converter import ResponseConverter
 from codex_rosetta.converters.stream_converter import StreamConverter
+from codex_rosetta.models.common import is_simulated_function, extract_original_type, ROSETTA_TOOL_PREFIX
+from codex_rosetta.search.base import SearchProvider
+from codex_rosetta.search.formatter import format_search_results
 from codex_rosetta.utils.logging import get_logger
 from codex_rosetta.utils.sse import format_sse_event
 
 logger = get_logger("router")
-settings = get_settings()
 
 router = APIRouter()
 
@@ -27,6 +30,44 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _get_search_provider() -> SearchProvider | None:
+    s = get_settings()
+    if not s.WEB_SEARCH_ENABLED:
+        return None
+
+    provider = s.WEB_SEARCH_PROVIDER
+
+    if provider == "tavily":
+        if not s.WEB_SEARCH_API_KEY:
+            return None
+        from codex_rosetta.search.tavily_provider import TavilySearchProvider
+        return TavilySearchProvider(api_key=s.WEB_SEARCH_API_KEY)
+
+    if provider == "searxng":
+        if not s.WEB_SEARCH_BASE_URL:
+            return None
+        from codex_rosetta.search.searxng_provider import SearXNGSearchProvider
+        return SearXNGSearchProvider(base_url=s.WEB_SEARCH_BASE_URL, api_key=s.WEB_SEARCH_API_KEY)
+
+    if provider == "brave":
+        if not s.WEB_SEARCH_API_KEY:
+            return None
+        from codex_rosetta.search.brave_provider import BraveSearchProvider
+        return BraveSearchProvider(api_key=s.WEB_SEARCH_API_KEY)
+
+    if provider == "duckduckgo":
+        from codex_rosetta.search.duckduckgo_provider import DuckDuckGoSearchProvider
+        return DuckDuckGoSearchProvider(base_url=s.WEB_SEARCH_BASE_URL, api_key=s.WEB_SEARCH_API_KEY)
+
+    if not s.WEB_SEARCH_BASE_URL:
+        return None
+    from codex_rosetta.search.http_provider import HttpSearchProvider
+    return HttpSearchProvider(
+        base_url=s.WEB_SEARCH_BASE_URL,
+        api_key=s.WEB_SEARCH_API_KEY,
+    )
+
+
 @router.post("/v1/responses", response_model=None)
 async def create_response(request: Request):
     request_id = getattr(request.state, "request_id", "unknown")
@@ -34,10 +75,8 @@ async def create_response(request: Request):
 
     body = await request.json()
 
-    # Get auditor from middleware (no-op if audit disabled)
     auditor = getattr(request.state, "auditor", NoOpAuditLogger())
 
-    # Log incoming request
     log.info(
         "request_received",
         model=body.get("model"),
@@ -48,12 +87,10 @@ async def create_response(request: Request):
         has_instructions=bool(body.get("instructions")),
     )
 
-    # Set up components
     upstream = get_upstream_client()
     store = get_conversation_store()
     request_converter = RequestConverter()
 
-    # Resolve previous_response_id or conversation parameter
     conversation_messages: list[dict[str, Any]] | None = None
     prev_id = body.get("previous_response_id")
     conv_param = body.get("conversation")
@@ -66,7 +103,6 @@ async def create_response(request: Request):
             conversation_messages = await store.retrieve_by_conversation_id(conv_id)
             log.debug("conversation_resolved", via="conversation", conversation_id=conv_id, found=conversation_messages is not None)
 
-    # Convert request
     chat_request, context = await request_converter.convert(body, conversation_messages, auditor=auditor)
 
     log.info(
@@ -77,14 +113,15 @@ async def create_response(request: Request):
         tool_count=len(chat_request.get("tools", [])),
     )
 
-    if settings.LOG_UPSTREAM_REQUESTS:
+    if get_settings().LOG_UPSTREAM_REQUESTS:
         log.debug("upstream_request_body", body=chat_request)
 
     is_streaming = body.get("stream", False)
+    search_provider = _get_search_provider()
 
     if is_streaming:
         return StreamingResponse(
-            _stream_response(upstream, chat_request, context, store, body, log, auditor),
+            _stream_response(upstream, chat_request, context, store, body, log, auditor, search_provider),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -94,9 +131,14 @@ async def create_response(request: Request):
         )
     else:
         try:
-            chat_response = await _call_upstream_with_retry(
-                upstream, chat_request, context, log
-            )
+            if search_provider:
+                chat_response = await _search_loop_non_streaming(
+                    upstream, chat_request, context, log, search_provider, auditor,
+                )
+            else:
+                chat_response = await _call_upstream_with_retry(
+                    upstream, chat_request, context, log
+                )
         except httpx.HTTPStatusError as e:
             log.warning("upstream_error", status=e.response.status_code, error=str(e))
             return JSONResponse(
@@ -108,13 +150,12 @@ async def create_response(request: Request):
                 ),
             )
 
-        if settings.LOG_UPSTREAM_RESPONSES:
+        if get_settings().LOG_UPSTREAM_RESPONSES:
             log.debug("upstream_response_body", body=chat_response)
 
         response_converter = ResponseConverter()
         responses_response = response_converter.convert(chat_response, context)
 
-        # Summarize output items
         output_items = responses_response.get("output", [])
         item_types = [item.get("type", "unknown") for item in output_items]
         usage = responses_response.get("usage", {})
@@ -128,7 +169,6 @@ async def create_response(request: Request):
             output_tokens=usage.get("output_tokens", 0),
         )
 
-        # Store conversation state
         conv_id = _extract_conversation_id(body)
         await store.store(
             context.response_id,
@@ -143,6 +183,336 @@ async def create_response(request: Request):
         return JSONResponse(content=responses_response)
 
 
+def _extract_web_search_tool_calls(
+    chat_response: dict[str, Any],
+) -> list[dict[str, Any]]:
+    choices = chat_response.get("choices") or []
+    web_search_calls = []
+    for choice in choices:
+        message = choice.get("message") or {}
+        tool_calls = message.get("tool_calls") or []
+        for tc in tool_calls:
+            func = tc.get("function") or {}
+            name = func.get("name", "")
+            if name == f"{ROSETTA_TOOL_PREFIX}web_search" or name == f"{ROSETTA_TOOL_PREFIX}web_search_2025_08_26":
+                web_search_calls.append(tc)
+    return web_search_calls
+
+
+def _should_forward_search_stream_event(
+    event_type: str,
+    event_data: dict[str, Any],
+) -> bool:
+    """Forward only user-visible message events during search-assisted streaming."""
+    if event_type in {
+        "response.created",
+        "response.in_progress",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.added",
+        "response.content_part.done",
+        "response.completed",
+        "response.error",
+        "response.failed",
+    }:
+        return True
+
+    if event_type in {"response.output_item.added", "response.output_item.done"}:
+        item = event_data.get("item") or {}
+        return item.get("type") == "message"
+
+    return False
+
+
+def _parse_search_query(tool_call: dict[str, Any]) -> str:
+    func = tool_call.get("function") or {}
+    arguments_str = func.get("arguments", "{}")
+    try:
+        arguments = json.loads(arguments_str) if isinstance(arguments_str, str) else arguments_str
+    except json.JSONDecodeError:
+        arguments = {}
+    return arguments.get("query", "")
+
+
+def _inject_search_results(
+    chat_request: dict[str, Any],
+    chat_response: dict[str, Any],
+    search_results_map: dict[str, str],
+) -> dict[str, Any]:
+    messages = list(chat_request.get("messages", []))
+
+    choices = chat_response.get("choices") or []
+    for choice in choices:
+        message = choice.get("message") or {}
+        assistant_msg = {"role": "assistant"}
+        content = message.get("content")
+        if content:
+            assistant_msg["content"] = content
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+        messages.append(assistant_msg)
+
+        for tc in tool_calls or []:
+            tc_id = tc.get("id", "")
+            tc_result = search_results_map.get(tc_id, "搜索未返回结果。")
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": tc_result,
+            })
+
+    new_request = dict(chat_request)
+    new_request["messages"] = messages
+    return new_request
+
+
+async def _execute_searches(
+    tool_calls: list[dict[str, Any]],
+    search_provider: SearchProvider,
+    max_results: int,
+    log: Any,
+    auditor: Any,
+) -> dict[str, str]:
+    results_map: dict[str, str] = {}
+    for tc in tool_calls:
+        query = _parse_search_query(tc)
+        if not query:
+            tc_id = tc.get("id", "")
+            results_map[tc_id] = "搜索查询为空，无法执行搜索。"
+            continue
+
+        log.info("web_search_executing", query=query)
+        search_response = await search_provider.search(query, max_results=max_results)
+        formatted = format_search_results(search_response)
+        tc_id = tc.get("id", "")
+        results_map[tc_id] = formatted
+
+        log.info("web_search_completed", query=query, result_count=len(search_response.results))
+        auditor.record_output_event("web_search", {
+            "query": query,
+            "result_count": len(search_response.results),
+        })
+
+    return results_map
+
+
+async def _search_loop_non_streaming(
+    upstream: Any,
+    chat_request: dict[str, Any],
+    context: Any,
+    log: Any,
+    search_provider: SearchProvider,
+    auditor: Any,
+) -> dict[str, Any]:
+    s = get_settings()
+    max_rounds = s.WEB_SEARCH_MAX_ROUNDS
+    max_results = s.WEB_SEARCH_MAX_RESULTS
+
+    current_request = chat_request
+    for round_num in range(max_rounds):
+        chat_response = await _call_upstream_with_retry(upstream, current_request, context, log)
+
+        web_search_calls = _extract_web_search_tool_calls(chat_response)
+        if not web_search_calls:
+            log.debug("search_loop_no_web_search_call", round=round_num)
+            return chat_response
+
+        log.info("search_loop_round", round=round_num + 1, search_calls=len(web_search_calls))
+
+        search_results = await _execute_searches(
+            web_search_calls, search_provider, max_results, log, auditor,
+        )
+
+        current_request = _inject_search_results(current_request, chat_response, search_results)
+
+    log.warning("search_loop_max_rounds_reached", max_rounds=max_rounds)
+    return await _call_upstream_with_retry(upstream, current_request, context, log)
+
+
+def _reconstruct_response(chunks: list[bytes]) -> dict[str, Any]:
+    combined = b"".join(chunks)
+    lines = combined.decode("utf-8", errors="replace").split("\n")
+
+    data_parts: list[str] = []
+    for line in lines:
+        if line.startswith("data: "):
+            payload = line[6:].strip()
+            if payload == "[DONE]":
+                break
+            data_parts.append(payload)
+
+    if not data_parts:
+        return {}
+
+    choices: dict[int, dict[str, Any]] = {}
+    model = ""
+    usage = None
+
+    for part in data_parts:
+        try:
+            chunk = json.loads(part)
+        except json.JSONDecodeError:
+            continue
+
+        model = chunk.get("model", model)
+        chunk_usage = chunk.get("usage")
+        if chunk_usage:
+            usage = chunk_usage
+
+        for c in chunk.get("choices", []):
+            idx = c.get("index", 0)
+            if idx not in choices:
+                choices[idx] = {
+                    "message": {"role": "assistant", "content": "", "tool_calls": []},
+                    "finish_reason": None,
+                }
+
+            delta = c.get("delta", {})
+
+            content = delta.get("content")
+            if content:
+                choices[idx]["message"]["content"] += content
+
+            tc_deltas = delta.get("tool_calls")
+            if tc_deltas:
+                for tc_delta in tc_deltas:
+                    tc_index = tc_delta.get("index", 0)
+                    while len(choices[idx]["message"]["tool_calls"]) <= tc_index:
+                        choices[idx]["message"]["tool_calls"].append({
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        })
+                    tc_entry = choices[idx]["message"]["tool_calls"][tc_index]
+
+                    if tc_delta.get("id"):
+                        tc_entry["id"] = tc_delta["id"]
+                    func_delta = tc_delta.get("function", {})
+                    if func_delta.get("name"):
+                        tc_entry["function"]["name"] = func_delta["name"]
+                    if func_delta.get("arguments"):
+                        tc_entry["function"]["arguments"] += func_delta["arguments"]
+
+            fr = c.get("finish_reason")
+            if fr:
+                choices[idx]["finish_reason"] = fr
+
+    choices_list = []
+    for idx in sorted(choices.keys()):
+        ch = choices[idx]
+        msg = ch["message"]
+        if not msg.get("content") and not msg.get("tool_calls"):
+            msg["content"] = None
+        if not msg["tool_calls"]:
+            del msg["tool_calls"]
+        choices_list.append({"index": idx, "message": msg, "finish_reason": ch["finish_reason"]})
+
+    result: dict[str, Any] = {
+        "choices": choices_list,
+        "model": model,
+    }
+    if usage:
+        result["usage"] = usage
+
+    return result
+
+
+async def _consume_stream_full(
+    upstream: Any,
+    chat_request: dict[str, Any],
+) -> dict[str, Any]:
+    full_chunks: list[bytes] = []
+    async for raw_chunk in upstream.chat_completions_stream(chat_request):
+        full_chunks.append(raw_chunk)
+
+    combined = b"".join(full_chunks)
+    lines = combined.decode("utf-8", errors="replace").split("\n")
+
+    data_parts: list[str] = []
+    for line in lines:
+        if line.startswith("data: "):
+            payload = line[6:].strip()
+            if payload == "[DONE]":
+                break
+            data_parts.append(payload)
+
+    if not data_parts:
+        return {}
+
+    choices: dict[int, dict[str, Any]] = {}
+    model = ""
+    usage = None
+
+    for part in data_parts:
+        try:
+            chunk = json.loads(part)
+        except json.JSONDecodeError:
+            continue
+
+        model = chunk.get("model", model)
+        chunk_usage = chunk.get("usage")
+        if chunk_usage:
+            usage = chunk_usage
+
+        for c in chunk.get("choices", []):
+            idx = c.get("index", 0)
+            if idx not in choices:
+                choices[idx] = {
+                    "message": {"role": "assistant", "content": "", "tool_calls": []},
+                    "finish_reason": None,
+                }
+
+            delta = c.get("delta", {})
+
+            content = delta.get("content")
+            if content:
+                choices[idx]["message"]["content"] += content
+
+            tc_deltas = delta.get("tool_calls")
+            if tc_deltas:
+                for tc_delta in tc_deltas:
+                    tc_index = tc_delta.get("index", 0)
+                    while len(choices[idx]["message"]["tool_calls"]) <= tc_index:
+                        choices[idx]["message"]["tool_calls"].append({
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        })
+                    tc_entry = choices[idx]["message"]["tool_calls"][tc_index]
+
+                    if tc_delta.get("id"):
+                        tc_entry["id"] = tc_delta["id"]
+                    func_delta = tc_delta.get("function", {})
+                    if func_delta.get("name"):
+                        tc_entry["function"]["name"] = func_delta["name"]
+                    if func_delta.get("arguments"):
+                        tc_entry["function"]["arguments"] += func_delta["arguments"]
+
+            fr = c.get("finish_reason")
+            if fr:
+                choices[idx]["finish_reason"] = fr
+
+    choices_list = []
+    for idx in sorted(choices.keys()):
+        ch = choices[idx]
+        msg = ch["message"]
+        if not msg.get("content") and not msg.get("tool_calls"):
+            msg["content"] = None
+        if not msg["tool_calls"]:
+            del msg["tool_calls"]
+        choices_list.append({"index": idx, "message": msg, "finish_reason": ch["finish_reason"]})
+
+    result: dict[str, Any] = {
+        "choices": choices_list,
+        "model": model,
+    }
+    if usage:
+        result["usage"] = usage
+
+    return result
+
+
 async def _stream_response(
     upstream: Any,
     chat_request: dict[str, Any],
@@ -151,8 +521,148 @@ async def _stream_response(
     original_body: dict[str, Any],
     log: Any,
     auditor: Any,
+    search_provider: SearchProvider | None = None,
 ) -> Any:
-    """Yield Responses API SSE events converted from upstream Chat Completions stream."""
+    if not search_provider:
+        async for event in _stream_response_passthrough(
+            upstream, chat_request, context, store, original_body, log, auditor,
+        ):
+            yield event
+        return
+
+    s = get_settings()
+    max_rounds = s.WEB_SEARCH_MAX_ROUNDS
+    max_results = s.WEB_SEARCH_MAX_RESULTS
+    current_request = chat_request
+
+    stream_converter = StreamConverter(context, auditor=auditor)
+
+    log.info("stream_started", model=context.model, response_id=context.response_id)
+    start = time.monotonic()
+    total_chunk_count = 0
+
+    try:
+        for round_num in range(max_rounds):
+            if round_num == 0:
+                log.info("search_loop_stream_first_round")
+            else:
+                log.info("search_loop_stream_round", round=round_num + 1)
+
+            chunks: list[bytes] = []
+            async for raw_chunk in upstream.chat_completions_stream(current_request):
+                total_chunk_count += 1
+                chunks.append(raw_chunk)
+                auditor.record_upstream_chunk(raw_chunk)
+                async for event_type, event_data in stream_converter.process_chunk(raw_chunk):
+                    if event_data is None:
+                        continue
+                    if event_type and _should_forward_search_stream_event(event_type, event_data):
+                        if event_type != "response.completed":
+                            yield format_sse_event(event_type, event_data)
+
+            async for event_type, event_data in stream_converter.flush_buffer():
+                if event_data is None:
+                    continue
+                if event_type and _should_forward_search_stream_event(event_type, event_data):
+                    if event_type != "response.completed":
+                        yield format_sse_event(event_type, event_data)
+
+            chat_response = _reconstruct_response(chunks)
+            web_search_calls = _extract_web_search_tool_calls(chat_response)
+
+            if not web_search_calls:
+                log.debug("search_loop_stream_no_search", round=round_num)
+                async for event_type, event_data in stream_converter.finalize():
+                    yield format_sse_event(event_type, event_data)
+                break
+
+            log.info(
+                "search_loop_stream_search_found",
+                round=round_num + 1,
+                search_calls=len(web_search_calls),
+            )
+
+            search_results = await _execute_searches(
+                web_search_calls, search_provider, max_results, log, auditor,
+            )
+            current_request = _inject_search_results(current_request, chat_response, search_results)
+            stream_converter.prepare_for_next_round()
+
+        else:
+            log.warning("search_loop_stream_max_rounds_reached", max_rounds=max_rounds)
+            async for raw_chunk in upstream.chat_completions_stream(current_request):
+                total_chunk_count += 1
+                auditor.record_upstream_chunk(raw_chunk)
+                async for event_type, event_data in stream_converter.process_chunk(raw_chunk):
+                    if event_data is None:
+                        continue
+                    if event_type:
+                        yield format_sse_event(event_type, event_data)
+
+            async for event_type, event_data in stream_converter.flush_buffer():
+                if event_data is None:
+                    continue
+                if event_type:
+                    yield format_sse_event(event_type, event_data)
+
+            async for event_type, event_data in stream_converter.finalize():
+                yield format_sse_event(event_type, event_data)
+
+        output_items = stream_converter.current_output_items
+        conv_id = _extract_conversation_id(original_body)
+        await store.store(
+            context.response_id,
+            current_request.get("messages", []),
+            output_items,
+            conversation_id=conv_id,
+        )
+
+        duration_ms = round((time.monotonic() - start) * 1000)
+        item_types = [item.get("type", "unknown") for item in output_items]
+
+        log.info(
+            "stream_completed",
+            response_id=context.response_id,
+            output_count=len(output_items),
+            output_types=item_types,
+            chunk_count=total_chunk_count,
+            duration_ms=duration_ms,
+        )
+        log.debug("conversation_stored", response_id=context.response_id, conversation_id=conv_id)
+
+        auditor.set_output_types(item_types)
+
+    except Exception as e:
+        log.error("stream_error", error=str(e), exc_info=True)
+        error_event = {
+            "type": "response.error",
+            "error": {"code": "stream_error", "message": str(e)},
+            "sequence_number": stream_converter.next_sequence_number(),
+        }
+        yield format_sse_event("response.error", error_event)
+
+        failed_event = {
+            "type": "response.failed",
+            "response": {
+                "id": context.response_id,
+                "object": "response",
+                "status": "failed",
+                "error": {"code": "stream_error", "message": str(e)},
+            },
+            "sequence_number": stream_converter.next_sequence_number(),
+        }
+        yield format_sse_event("response.failed", failed_event)
+
+
+async def _stream_response_passthrough(
+    upstream: Any,
+    chat_request: dict[str, Any],
+    context: Any,
+    store: Any,
+    original_body: dict[str, Any],
+    log: Any,
+    auditor: Any,
+) -> Any:
     stream_converter = StreamConverter(context, auditor=auditor)
 
     log.info("stream_started", model=context.model, response_id=context.response_id)
@@ -169,18 +679,15 @@ async def _stream_response(
                 if event_type:
                     yield format_sse_event(event_type, event_data)
 
-        # Flush any remaining buffered SSE data
         async for event_type, event_data in stream_converter.flush_buffer():
             if event_data is None:
                 continue
             if event_type:
                 yield format_sse_event(event_type, event_data)
 
-        # Emit finalization events
         async for event_type, event_data in stream_converter.finalize():
             yield format_sse_event(event_type, event_data)
 
-        # Store conversation state
         output_items = stream_converter.current_output_items
         conv_id = _extract_conversation_id(original_body)
         await store.store(
@@ -243,7 +750,6 @@ def _make_error_response(response_id: str, code: str, message: str) -> dict[str,
 
 
 def _extract_conversation_id(body: dict[str, Any]) -> str | None:
-    """Extract conversation_id from the conversation parameter."""
     conv_param = body.get("conversation")
     if conv_param is None:
         return None
@@ -261,7 +767,6 @@ async def _call_upstream_with_retry(
     log: Any = None,
     max_retries: int = 3,
 ) -> dict[str, Any]:
-    """Call upstream with automatic message trimming on context overflow."""
     if log is None:
         log = logger
 
@@ -278,7 +783,6 @@ async def _call_upstream_with_retry(
             if e.response.status_code != 400:
                 raise
 
-            # Check if it's a context length error
             try:
                 error_body = e.response.json()
                 error_msg = str(error_body.get("error", {})).lower()
@@ -290,20 +794,18 @@ async def _call_upstream_with_retry(
             if not any(kw in error_msg for kw in context_keywords):
                 raise
 
-            # Trim messages from head (keep system messages)
             messages = chat_request.get("messages", [])
             if len(messages) <= 2:
-                raise  # Can't trim further
+                raise
 
             system_msgs = [m for m in messages if m.get("role") == "system"]
             non_system = [m for m in messages if m.get("role") != "system"]
 
-            # Remove oldest non-system messages (trim 25%)
             trim_count = max(1, len(non_system) // 4)
             non_system = non_system[trim_count:]
 
             if not non_system:
-                raise  # Nothing left after trimming
+                raise
 
             chat_request["messages"] = system_msgs + non_system
 

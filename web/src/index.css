@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+@theme {
+  /* Rosetta color palette */
+  --color-rosetta-black: #0a0e17;
+  --color-rosetta-dark: #111827;
+  --color-rosetta-surface: #141925;
+  --color-rosetta-card: #1a2035;
+  --color-rosetta-border: #252d42;
+  --color-rosetta-gold: #d4a853;
+  --color-rosetta-gold-light: #e8c878;
+  --color-rosetta-gold-dim: #8b7340;
+  --color-rosetta-text: #e2e8f0;
+  --color-rosetta-muted: #64748b;
+  --color-rosetta-success: #10b981;
+  --color-rosetta-error: #f43f5e;
+  --color-rosetta-warning: #f59e0b;
+
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  --font-sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap");
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: var(--color-rosetta-black);
+    color: var(--color-rosetta-text);
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--color-rosetta-dark);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-rosetta-border);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-rosetta-muted);
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-rosetta-gold) 30%, transparent);
+    color: var(--color-rosetta-text);
+  }
+}
+
+@layer components {
+  .rosetta-glow {
+    box-shadow: 0 0 20px color-mix(in srgb, var(--color-rosetta-gold) 15%, transparent),
+      0 0 40px color-mix(in srgb, var(--color-rosetta-gold) 5%, transparent);
+  }
+
+  .rosetta-glow-text {
+    text-shadow: 0 0 10px color-mix(in srgb, var(--color-rosetta-gold) 40%, transparent);
+  }
+
+  .rosetta-grid-bg {
+    background-image: linear-gradient(
+        color-mix(in srgb, var(--color-rosetta-border) 30%, transparent) 1px,
+        transparent 1px
+      ),
+      linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--color-rosetta-border) 30%, transparent) 1px,
+        transparent 1px
+      );
+    background-size: 40px 40px;
+  }
+
+  .rosetta-noise {
+    position: relative;
+  }
+
+  .rosetta-noise::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    opacity: 0.03;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .rosetta-terminal-input {
+    border-left: 3px solid var(--color-rosetta-gold);
+    background-color: var(--color-rosetta-dark);
+    font-family: var(--font-mono);
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+
+  .rosetta-terminal-input:focus {
+    border-left-color: var(--color-rosetta-gold-light);
+    box-shadow: 0 0 12px color-mix(in srgb, var(--color-rosetta-gold) 20%, transparent);
+    outline: none;
+  }
+}

@@ -310,3 +310,62 @@ class TestMixedTextAndToolCalls:
         types = [i.get("type") for i in output]
         assert "message" in types
         assert "function_call" in types
+
+
+class TestRoundFiltering:
+    @pytest.mark.asyncio
+    async def test_current_output_items_only_include_latest_round(self, ctx):
+        sim_name = make_simulated_function_name("web_search")
+        ctx.register_builtin_tool(sim_name, "web_search")
+
+        sc = StreamConverter(ctx)
+
+        async for _ in sc.process_chunk(make_chunk({
+            "tool_calls": [{
+                "index": 0,
+                "id": "call_ws",
+                "type": "function",
+                "function": {"name": sim_name, "arguments": '{"query":"AI news"}'},
+            }]
+        })):
+            pass
+
+        sc.prepare_for_next_round()
+
+        async for _ in sc.process_chunk(make_chunk({"content": "Final answer"})):
+            pass
+
+        items = sc.current_output_items
+        assert [item["type"] for item in items] == ["message"]
+        assert items[0]["content"][0]["text"] == "Final answer"
+
+    @pytest.mark.asyncio
+    async def test_completed_response_only_includes_latest_round(self, ctx):
+        sim_name = make_simulated_function_name("web_search")
+        ctx.register_builtin_tool(sim_name, "web_search")
+
+        sc = StreamConverter(ctx)
+        events = []
+
+        async for evt in sc.process_chunk(make_chunk({
+            "tool_calls": [{
+                "index": 0,
+                "id": "call_ws",
+                "type": "function",
+                "function": {"name": sim_name, "arguments": '{"query":"AI news"}'},
+            }]
+        })):
+            events.append(evt)
+
+        sc.prepare_for_next_round()
+
+        async for evt in sc.process_chunk(make_chunk({"content": "Final answer"})):
+            events.append(evt)
+
+        async for evt in sc.finalize():
+            events.append(evt)
+
+        completed = [event for event in events if event[0] == "response.completed"][0][1]
+        output = completed["response"]["output"]
+        assert [item["type"] for item in output] == ["message"]
+        assert output[0]["content"][0]["text"] == "Final answer"

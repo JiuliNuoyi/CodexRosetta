@@ -19,10 +19,11 @@ class OutputItemState:
     has_content_part_added: bool = False
     has_item_added: bool = False
     is_closed: bool = False
+    delta_complete: bool = False
 
-    # For built-in tool simulation
     original_tool_type: str | None = None
     has_emitted_lifecycle: bool = False
+    round_id: int = 0
 
 
 @dataclass
@@ -33,6 +34,7 @@ class StreamState:
     model: str
     created_at: float = 0.0
     sequence_number: int = 0
+    current_round_id: int = 0
     output_items: list[OutputItemState] = field(default_factory=list)
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
@@ -50,7 +52,7 @@ class StreamState:
     def get_current_message_item(self) -> OutputItemState | None:
         """Get the last message-type output item that hasn't been closed."""
         for item in reversed(self.output_items):
-            if item.item_type == "message" and not item.is_closed:
+            if item.item_type == "message" and not item.is_closed and not item.delta_complete:
                 return item
         return None
 
@@ -60,6 +62,7 @@ class StreamState:
             item_id=item_id,
             item_type="message",
             output_index=len(self.output_items),
+            round_id=self.current_round_id,
         )
         self.output_items.append(item)
         return item
@@ -74,6 +77,7 @@ class StreamState:
             output_index=len(self.output_items),
             call_id=call_id,
             function_name=function_name,
+            round_id=self.current_round_id,
         )
         self.output_items.append(item)
         return item
@@ -88,7 +92,7 @@ class StreamState:
     def get_current_reasoning_item(self) -> OutputItemState | None:
         """Get the last reasoning-type output item that hasn't been closed."""
         for item in reversed(self.output_items):
-            if item.item_type == "reasoning" and not item.is_closed:
+            if item.item_type == "reasoning" and not item.is_closed and not item.delta_complete:
                 return item
         return None
 
@@ -98,6 +102,19 @@ class StreamState:
             item_id=item_id,
             item_type="reasoning",
             output_index=len(self.output_items),
+            round_id=self.current_round_id,
         )
         self.output_items.append(item)
         return item
+
+    def prepare_for_next_round(self) -> None:
+        """Prepare state for a new streaming round within the same response.
+
+        Marks existing output items as delta-complete so new deltas create
+        fresh items, while keeping them available for finalization.
+        """
+        for item in self.output_items:
+            item.delta_complete = True
+        self.current_round_id += 1
+        self.finish_reason = None
+        self.tool_call_index_map = {}

@@ -52,6 +52,8 @@ class StreamConverter:
         is_incomplete = self._state.finish_reason == "length"
         items: list[dict[str, Any]] = []
         for item in self._state.output_items:
+            if item.round_id < self._state.current_round_id:
+                continue
             if item.item_type == "message":
                 item_status = "incomplete" if is_incomplete else "completed"
                 msg: dict[str, Any] = {
@@ -97,6 +99,14 @@ class StreamConverter:
 
     def next_sequence_number(self) -> int:
         return self._state.next_sequence_number()
+
+    def prepare_for_next_round(self) -> None:
+        """Prepare the converter for a new streaming round within the same response.
+
+        Called between search rounds so that new deltas create fresh output
+        items instead of appending to items from a previous round.
+        """
+        self._state.prepare_for_next_round()
 
     async def process_chunk(
         self, raw_chunk: bytes | str
@@ -543,6 +553,8 @@ class StreamConverter:
         """Build the full Response object for the completed event."""
         output: list[dict[str, Any]] = []
         for item in self._state.output_items:
+            if item.round_id < self._state.current_round_id:
+                continue
             if item.item_type == "message":
                 output.append({
                     "type": "message",
