@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import time
 from typing import Any
 
@@ -194,33 +196,26 @@ def _extract_web_search_tool_calls(
         for tc in tool_calls:
             func = tc.get("function") or {}
             name = func.get("name", "")
-            if name == f"{ROSETTA_TOOL_PREFIX}web_search" or name == f"{ROSETTA_TOOL_PREFIX}web_search_2025_08_26":
+            if _is_web_search_function_name(name):
                 web_search_calls.append(tc)
     return web_search_calls
 
 
-def _should_forward_search_stream_event(
-    event_type: str,
-    event_data: dict[str, Any],
-) -> bool:
-    """Forward only user-visible message events during search-assisted streaming."""
-    if event_type in {
-        "response.created",
-        "response.in_progress",
-        "response.output_text.delta",
-        "response.output_text.done",
-        "response.content_part.added",
-        "response.content_part.done",
-        "response.completed",
-        "response.error",
-        "response.failed",
-    }:
-        return True
+def _is_web_search_function_name(name: str) -> bool:
+    return name in {
+        f"{ROSETTA_TOOL_PREFIX}web_search",
+        f"{ROSETTA_TOOL_PREFIX}web_search_2025_08_26",
+    }
 
-    if event_type in {"response.output_item.added", "response.output_item.done"}:
-        item = event_data.get("item") or {}
-        return item.get("type") == "message"
 
+def _chat_request_has_web_search_tool(chat_request: dict[str, Any]) -> bool:
+    tools = chat_request.get("tools") or []
+    for tool in tools:
+        if tool.get("type") != "function":
+            continue
+        func = tool.get("function") or {}
+        if _is_web_search_function_name(func.get("name", "")):
+            return True
     return False
 
 
@@ -421,96 +416,60 @@ def _reconstruct_response(chunks: list[bytes]) -> dict[str, Any]:
 async def _consume_stream_full(
     upstream: Any,
     chat_request: dict[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     full_chunks: list[bytes] = []
     async for raw_chunk in upstream.chat_completions_stream(chat_request):
         full_chunks.append(raw_chunk)
+    return _reconstruct_response(full_chunks), len(full_chunks)
 
-    combined = b"".join(full_chunks)
-    lines = combined.decode("utf-8", errors="replace").split("\n")
 
-    data_parts: list[str] = []
-    for line in lines:
-        if line.startswith("data: "):
-            payload = line[6:].strip()
-            if payload == "[DONE]":
-                break
-            data_parts.append(payload)
+async def _prepare_search_stream_request(
+    upstream: Any,
+    chat_request: dict[str, Any],
+    context: Any,
+    log: Any,
+    auditor: Any,
+    search_provider: SearchProvider,
+) -> tuple[list[bytes], dict[str, Any], int]:
+    s = get_settings()
+    max_rounds = s.WEB_SEARCH_MAX_ROUNDS
+    max_results = s.WEB_SEARCH_MAX_RESULTS
+    current_request = chat_request
+    consumed_chunk_count = 0
 
-    if not data_parts:
-        return {}
+    for round_num in range(max_rounds):
+        if round_num == 0:
+            log.info("search_loop_stream_first_round")
+        else:
+            log.info("search_loop_stream_round", round=round_num + 1)
 
-    choices: dict[int, dict[str, Any]] = {}
-    model = ""
-    usage = None
+        round_chunks: list[bytes] = []
+        async for raw_chunk in upstream.chat_completions_stream(current_request):
+            round_chunks.append(raw_chunk)
+            auditor.record_upstream_chunk(raw_chunk)
 
-    for part in data_parts:
-        try:
-            chunk = json.loads(part)
-        except json.JSONDecodeError:
-            continue
+        chat_response = _reconstruct_response(round_chunks)
+        chunk_count = len(round_chunks)
+        consumed_chunk_count += chunk_count
 
-        model = chunk.get("model", model)
-        chunk_usage = chunk.get("usage")
-        if chunk_usage:
-            usage = chunk_usage
+        web_search_calls = _extract_web_search_tool_calls(chat_response)
+        if not web_search_calls:
+            log.debug("search_loop_stream_final_round_ready", round=round_num + 1)
+            return round_chunks, current_request, consumed_chunk_count
 
-        for c in chunk.get("choices", []):
-            idx = c.get("index", 0)
-            if idx not in choices:
-                choices[idx] = {
-                    "message": {"role": "assistant", "content": "", "tool_calls": []},
-                    "finish_reason": None,
-                }
+        log.info(
+            "search_loop_stream_search_found",
+            round=round_num + 1,
+            search_calls=len(web_search_calls),
+        )
 
-            delta = c.get("delta", {})
+        search_results = await _execute_searches(
+            web_search_calls, search_provider, max_results, log, auditor,
+        )
+        current_request = _inject_search_results(current_request, chat_response, search_results)
 
-            content = delta.get("content")
-            if content:
-                choices[idx]["message"]["content"] += content
-
-            tc_deltas = delta.get("tool_calls")
-            if tc_deltas:
-                for tc_delta in tc_deltas:
-                    tc_index = tc_delta.get("index", 0)
-                    while len(choices[idx]["message"]["tool_calls"]) <= tc_index:
-                        choices[idx]["message"]["tool_calls"].append({
-                            "id": "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        })
-                    tc_entry = choices[idx]["message"]["tool_calls"][tc_index]
-
-                    if tc_delta.get("id"):
-                        tc_entry["id"] = tc_delta["id"]
-                    func_delta = tc_delta.get("function", {})
-                    if func_delta.get("name"):
-                        tc_entry["function"]["name"] = func_delta["name"]
-                    if func_delta.get("arguments"):
-                        tc_entry["function"]["arguments"] += func_delta["arguments"]
-
-            fr = c.get("finish_reason")
-            if fr:
-                choices[idx]["finish_reason"] = fr
-
-    choices_list = []
-    for idx in sorted(choices.keys()):
-        ch = choices[idx]
-        msg = ch["message"]
-        if not msg.get("content") and not msg.get("tool_calls"):
-            msg["content"] = None
-        if not msg["tool_calls"]:
-            del msg["tool_calls"]
-        choices_list.append({"index": idx, "message": msg, "finish_reason": ch["finish_reason"]})
-
-    result: dict[str, Any] = {
-        "choices": choices_list,
-        "model": model,
-    }
-    if usage:
-        result["usage"] = usage
-
-    return result
+    log.warning("search_loop_stream_max_rounds_reached", max_rounds=max_rounds)
+    return [], current_request, consumed_chunk_count
 
 
 async def _stream_response(
@@ -523,96 +482,139 @@ async def _stream_response(
     auditor: Any,
     search_provider: SearchProvider | None = None,
 ) -> Any:
-    if not search_provider:
+    if not search_provider or not _chat_request_has_web_search_tool(chat_request):
         async for event in _stream_response_passthrough(
             upstream, chat_request, context, store, original_body, log, auditor,
         ):
             yield event
         return
 
-    s = get_settings()
-    max_rounds = s.WEB_SEARCH_MAX_ROUNDS
-    max_results = s.WEB_SEARCH_MAX_RESULTS
-    current_request = chat_request
+    final_chunks, final_request, consumed_chunk_count = await _prepare_search_stream_request(
+        upstream, chat_request, context, log, auditor, search_provider,
+    )
+    log.info(
+        "search_loop_stream_visible_final_round",
+        prepared_chunk_count=consumed_chunk_count,
+    )
 
+    if final_chunks:
+        async for event in _replay_stream_chunks(
+            final_chunks, final_request, context, store, original_body, log, auditor,
+        ):
+            yield event
+        return
+
+    async for event in _stream_response_passthrough(
+        upstream, final_request, context, store, original_body, log, auditor,
+    ):
+        yield event
+
+
+def _split_simulated_delta(text: str, max_chars: int) -> list[str]:
+    if not text or len(text) <= max_chars:
+        return [text]
+
+    tokens = re.findall(r"\S+\s*", text)
+    if not tokens:
+        return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+
+    parts: list[str] = []
+    current = ""
+    for token in tokens:
+        if len(token) > max_chars:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.extend(token[i:i + max_chars] for i in range(0, len(token), max_chars))
+            continue
+
+        if current and len(current) + len(token) > max_chars:
+            parts.append(current)
+            current = token
+        else:
+            current += token
+
+    if current:
+        parts.append(current)
+
+    if len(parts) == 1 and len(parts[0]) == len(text):
+        return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+    return parts
+
+
+async def _yield_replayed_event(
+    stream_converter: StreamConverter,
+    event_type: str,
+    event_data: dict[str, Any],
+) -> Any:
+    settings = get_settings()
+    if (
+        not settings.WEB_SEARCH_SIMULATED_STREAMING_ENABLED
+        or event_type != "response.output_text.delta"
+    ):
+        yield format_sse_event(event_type, event_data)
+        return
+
+    pieces = _split_simulated_delta(
+        event_data.get("delta", ""),
+        max(1, settings.WEB_SEARCH_SIMULATED_STREAM_MAX_CHARS),
+    )
+    delay_seconds = max(0, settings.WEB_SEARCH_SIMULATED_STREAM_DELAY_MS) / 1000
+
+    for index, piece in enumerate(pieces):
+        chunk_event = dict(event_data)
+        chunk_event["delta"] = piece
+        if index > 0:
+            chunk_event["sequence_number"] = stream_converter.next_sequence_number()
+        yield format_sse_event(event_type, chunk_event)
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+
+
+async def _replay_stream_chunks(
+    raw_chunks: list[bytes],
+    chat_request: dict[str, Any],
+    context: Any,
+    store: Any,
+    original_body: dict[str, Any],
+    log: Any,
+    auditor: Any,
+) -> Any:
     stream_converter = StreamConverter(context, auditor=auditor)
 
     log.info("stream_started", model=context.model, response_id=context.response_id)
     start = time.monotonic()
-    total_chunk_count = 0
+    chunk_count = 0
 
     try:
-        for round_num in range(max_rounds):
-            if round_num == 0:
-                log.info("search_loop_stream_first_round")
-            else:
-                log.info("search_loop_stream_round", round=round_num + 1)
-
-            chunks: list[bytes] = []
-            async for raw_chunk in upstream.chat_completions_stream(current_request):
-                total_chunk_count += 1
-                chunks.append(raw_chunk)
-                auditor.record_upstream_chunk(raw_chunk)
-                async for event_type, event_data in stream_converter.process_chunk(raw_chunk):
-                    if event_data is None:
-                        continue
-                    if event_type and _should_forward_search_stream_event(event_type, event_data):
-                        if event_type != "response.completed":
-                            yield format_sse_event(event_type, event_data)
-
-            async for event_type, event_data in stream_converter.flush_buffer():
-                if event_data is None:
-                    continue
-                if event_type and _should_forward_search_stream_event(event_type, event_data):
-                    if event_type != "response.completed":
-                        yield format_sse_event(event_type, event_data)
-
-            chat_response = _reconstruct_response(chunks)
-            web_search_calls = _extract_web_search_tool_calls(chat_response)
-
-            if not web_search_calls:
-                log.debug("search_loop_stream_no_search", round=round_num)
-                async for event_type, event_data in stream_converter.finalize():
-                    yield format_sse_event(event_type, event_data)
-                break
-
-            log.info(
-                "search_loop_stream_search_found",
-                round=round_num + 1,
-                search_calls=len(web_search_calls),
-            )
-
-            search_results = await _execute_searches(
-                web_search_calls, search_provider, max_results, log, auditor,
-            )
-            current_request = _inject_search_results(current_request, chat_response, search_results)
-            stream_converter.prepare_for_next_round()
-
-        else:
-            log.warning("search_loop_stream_max_rounds_reached", max_rounds=max_rounds)
-            async for raw_chunk in upstream.chat_completions_stream(current_request):
-                total_chunk_count += 1
-                auditor.record_upstream_chunk(raw_chunk)
-                async for event_type, event_data in stream_converter.process_chunk(raw_chunk):
-                    if event_data is None:
-                        continue
-                    if event_type:
-                        yield format_sse_event(event_type, event_data)
-
-            async for event_type, event_data in stream_converter.flush_buffer():
+        for raw_chunk in raw_chunks:
+            chunk_count += 1
+            async for event_type, event_data in stream_converter.process_chunk(raw_chunk):
                 if event_data is None:
                     continue
                 if event_type:
-                    yield format_sse_event(event_type, event_data)
+                    async for replayed in _yield_replayed_event(
+                        stream_converter, event_type, event_data,
+                    ):
+                        yield replayed
 
-            async for event_type, event_data in stream_converter.finalize():
-                yield format_sse_event(event_type, event_data)
+        async for event_type, event_data in stream_converter.flush_buffer():
+            if event_data is None:
+                continue
+            if event_type:
+                async for replayed in _yield_replayed_event(
+                    stream_converter, event_type, event_data,
+                ):
+                    yield replayed
+
+        async for event_type, event_data in stream_converter.finalize():
+            yield format_sse_event(event_type, event_data)
 
         output_items = stream_converter.current_output_items
         conv_id = _extract_conversation_id(original_body)
         await store.store(
             context.response_id,
-            current_request.get("messages", []),
+            chat_request.get("messages", []),
             output_items,
             conversation_id=conv_id,
         )
@@ -625,7 +627,7 @@ async def _stream_response(
             response_id=context.response_id,
             output_count=len(output_items),
             output_types=item_types,
-            chunk_count=total_chunk_count,
+            chunk_count=chunk_count,
             duration_ms=duration_ms,
         )
         log.debug("conversation_stored", response_id=context.response_id, conversation_id=conv_id)

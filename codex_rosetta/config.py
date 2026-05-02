@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     WEB_SEARCH_API_KEY: str = ""
     WEB_SEARCH_MAX_RESULTS: int = 5
     WEB_SEARCH_MAX_ROUNDS: int = 3
+    WEB_SEARCH_SIMULATED_STREAMING_ENABLED: bool = True
+    WEB_SEARCH_SIMULATED_STREAM_DELAY_MS: int = 25
+    WEB_SEARCH_SIMULATED_STREAM_MAX_CHARS: int = 32
 
 
 _runtime_overrides: dict[str, Any] = {}

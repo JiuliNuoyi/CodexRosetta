@@ -205,3 +205,148 @@ class TestStreamingProxy:
         texts = [d["data"]["delta"] for d in deltas]
         assert "Hello" in texts
         assert " world" in texts
+
+    def test_streaming_search_hides_intermediate_rounds(self, mock_upstream, mock_store):
+        first_round = [
+            b'data: {"id":"chatcmpl-search-1","object":"chat.completion.chunk","created":1746000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-search-1","object":"chat.completion.chunk","created":1746000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Let me search for that."},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-search-1","object":"chat.completion.chunk","created":1746000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ws","type":"function","function":{"name":"__rosetta_web_search","arguments":"{\\"query\\":\\"SearXNG project what is it\\"}"}}]},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-search-1","object":"chat.completion.chunk","created":1746000000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+        final_round = [
+            b'data: {"id":"chatcmpl-search-2","object":"chat.completion.chunk","created":1746000001,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-search-2","object":"chat.completion.chunk","created":1746000001,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"SearXNG is an open-source metasearch engine."},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-search-2","object":"chat.completion.chunk","created":1746000001,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":" It aggregates results from multiple search providers."},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-search-2","object":"chat.completion.chunk","created":1746000001,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":12,"total_tokens":32}}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+
+        call_count = {"count": 0}
+
+        async def mock_stream(*args, **kwargs):
+            call_count["count"] += 1
+            chunks = first_round if call_count["count"] == 1 else final_round
+            for chunk in chunks:
+                yield chunk
+
+        mock_upstream.chat_completions_stream = mock_stream
+
+        mock_search_provider = AsyncMock()
+        mock_search_provider.search.return_value = MagicMock(
+            query="SearXNG project what is it",
+            results=[MagicMock(title="SearXNG", url="https://example.com", snippet="meta search")],
+        )
+
+        with patch("codex_rosetta.api.router.get_upstream_client", return_value=mock_upstream), \
+             patch("codex_rosetta.api.router.get_conversation_store", return_value=mock_store), \
+             patch("codex_rosetta.api.router._get_search_provider", return_value=mock_search_provider):
+            from fastapi.testclient import TestClient
+            with TestClient(app) as client:
+                resp = client.post("/v1/responses", json={
+                    "model": "gpt-4o",
+                    "input": "What is SearXNG?",
+                    "stream": True,
+                    "tools": [{"type": "web_search"}],
+                })
+
+        assert resp.status_code == 200
+        assert call_count["count"] == 2
+        mock_search_provider.search.assert_awaited_once()
+
+        content = resp.content.decode()
+        events = []
+        event_type = None
+        for line in content.split("\n"):
+            if line.startswith("event:"):
+                event_type = line[6:].strip()
+            elif line.startswith("data:"):
+                data_str = line[5:].strip()
+                try:
+                    events.append({"event": event_type, "data": json.loads(data_str)})
+                except json.JSONDecodeError:
+                    pass
+
+        deltas = [e["data"]["delta"] for e in events if e["event"] == "response.output_text.delta"]
+        combined = "".join(deltas)
+
+        assert "Let me search for that." not in combined
+        assert "SearXNG is an open-source metasearch engine." in combined
+        assert "It aggregates results from multiple search providers." in combined
+
+        completed = [e for e in events if e["event"] == "response.completed"][0]["data"]
+        output_text = completed["response"]["output"][0]["content"][0]["text"]
+        assert "Let me search for that." not in output_text
+        assert "SearXNG is an open-source metasearch engine." in output_text
+        output_types = [item["type"] for item in completed["response"]["output"]]
+        assert output_types == ["message"]
+
+    def test_streaming_search_simulates_multiple_final_deltas(self, mock_upstream, mock_store):
+        first_round = [
+            b'data: {"id":"chatcmpl-search-1","object":"chat.completion.chunk","created":1746000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ws","type":"function","function":{"name":"__rosetta_web_search","arguments":"{\\"query\\":\\"SearXNG project what is it\\"}"}}]},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-search-1","object":"chat.completion.chunk","created":1746000000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+        final_round = [
+            b'data: {"id":"chatcmpl-search-2","object":"chat.completion.chunk","created":1746000001,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-search-2","object":"chat.completion.chunk","created":1746000001,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"SearXNG is an open-source metasearch engine that aggregates results from multiple providers into a single interface."},"finish_reason":null}]}\n\n',
+            b'data: {"id":"chatcmpl-search-2","object":"chat.completion.chunk","created":1746000001,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":12,"total_tokens":32}}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+
+        call_count = {"count": 0}
+
+        async def mock_stream(*args, **kwargs):
+            call_count["count"] += 1
+            chunks = first_round if call_count["count"] == 1 else final_round
+            for chunk in chunks:
+                yield chunk
+
+        mock_upstream.chat_completions_stream = mock_stream
+
+        mock_search_provider = AsyncMock()
+        mock_search_provider.search.return_value = MagicMock(
+            query="SearXNG project what is it",
+            results=[MagicMock(title="SearXNG", url="https://example.com", snippet="meta search")],
+        )
+
+        with patch("codex_rosetta.api.router.get_upstream_client", return_value=mock_upstream), \
+             patch("codex_rosetta.api.router.get_conversation_store", return_value=mock_store), \
+             patch("codex_rosetta.api.router._get_search_provider", return_value=mock_search_provider), \
+             patch("codex_rosetta.api.router.get_settings") as mock_get_settings:
+            settings = MagicMock()
+            settings.WEB_SEARCH_SIMULATED_STREAMING_ENABLED = True
+            settings.WEB_SEARCH_SIMULATED_STREAM_DELAY_MS = 0
+            settings.WEB_SEARCH_SIMULATED_STREAM_MAX_CHARS = 20
+            settings.WEB_SEARCH_MAX_ROUNDS = 3
+            settings.WEB_SEARCH_MAX_RESULTS = 5
+            mock_get_settings.return_value = settings
+
+            from fastapi.testclient import TestClient
+            with TestClient(app) as client:
+                resp = client.post("/v1/responses", json={
+                    "model": "gpt-4o",
+                    "input": "What is SearXNG?",
+                    "stream": True,
+                    "tools": [{"type": "web_search"}],
+                })
+
+        assert resp.status_code == 200
+        assert call_count["count"] == 2
+
+        content = resp.content.decode()
+        events = []
+        event_type = None
+        for line in content.split("\n"):
+            if line.startswith("event:"):
+                event_type = line[6:].strip()
+            elif line.startswith("data:"):
+                data_str = line[5:].strip()
+                try:
+                    events.append({"event": event_type, "data": json.loads(data_str)})
+                except json.JSONDecodeError:
+                    pass
+
+        deltas = [e["data"]["delta"] for e in events if e["event"] == "response.output_text.delta"]
+        assert len(deltas) >= 3
+        assert "".join(deltas).startswith("SearXNG is an open-source metasearch engine")

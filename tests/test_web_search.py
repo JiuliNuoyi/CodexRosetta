@@ -10,7 +10,7 @@ from codex_rosetta.api.router import (
     _extract_web_search_tool_calls,
     _parse_search_query,
     _inject_search_results,
-    _should_forward_search_stream_event,
+    _chat_request_has_web_search_tool,
 )
 
 
@@ -196,23 +196,19 @@ class TestMockSearchProvider:
         assert provider.calls == ["query1", "query2"]
 
 
-class TestSearchStreamEventFilter:
-    def test_forwards_message_item_events(self):
-        assert _should_forward_search_stream_event(
-            "response.output_item.added",
-            {"item": {"type": "message"}},
-        ) is True
+class TestSearchToolDetection:
+    def test_detects_web_search_tool_in_chat_request(self):
+        assert _chat_request_has_web_search_tool({
+            "tools": [{
+                "type": "function",
+                "function": {"name": "__rosetta_web_search"},
+            }]
+        }) is True
 
-    def test_filters_reasoning_and_search_item_events(self):
-        assert _should_forward_search_stream_event(
-            "response.output_item.added",
-            {"item": {"type": "reasoning"}},
-        ) is False
-        assert _should_forward_search_stream_event(
-            "response.output_item.done",
-            {"item": {"type": "web_search_call"}},
-        ) is False
-        assert _should_forward_search_stream_event(
-            "response.reasoning.delta",
-            {"delta": "thinking"},
-        ) is False
+    def test_ignores_non_search_tools(self):
+        assert _chat_request_has_web_search_tool({
+            "tools": [{
+                "type": "function",
+                "function": {"name": "get_weather"},
+            }]
+        }) is False
