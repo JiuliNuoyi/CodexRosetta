@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -7,6 +8,7 @@ from typing import Any, Literal, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_FILE = ".env"
+_PROVIDERS_FILE = "search_providers.json"
 
 
 class Settings(BaseSettings):
@@ -56,6 +58,53 @@ class Settings(BaseSettings):
     WEB_SEARCH_SIMULATED_STREAM_DELAY_MS: int = 25
     WEB_SEARCH_SIMULATED_STREAM_MAX_CHARS: int = 32
 
+
+PROVIDER_FIELD_DEFS: dict[str, dict[str, str]] = {
+    "tavily": {"WEB_SEARCH_BASE_URL": "clear", "WEB_SEARCH_API_KEY": "required"},
+    "searxng": {"WEB_SEARCH_BASE_URL": "required", "WEB_SEARCH_API_KEY": "clear"},
+    "brave": {"WEB_SEARCH_BASE_URL": "clear", "WEB_SEARCH_API_KEY": "required"},
+    "duckduckgo": {"WEB_SEARCH_BASE_URL": "clear", "WEB_SEARCH_API_KEY": "clear"},
+    "custom": {"WEB_SEARCH_BASE_URL": "required", "WEB_SEARCH_API_KEY": "optional"},
+}
+
+
+def _load_provider_saved() -> dict[str, dict[str, str]]:
+    path = Path(_PROVIDERS_FILE)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {p: {} for p in PROVIDER_FIELD_DEFS}
+
+
+def _save_provider_saved_to_file(saved: dict[str, dict[str, str]]) -> None:
+    path = Path(_PROVIDERS_FILE)
+    path.write_text(json.dumps(saved, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+_PROVIDER_SAVED: dict[str, dict[str, str]] = _load_provider_saved()
+
+
+def save_provider_state(provider: str, base_url: str = "", api_key: str = "") -> None:
+    if provider not in PROVIDER_FIELD_DEFS:
+        return
+    field_defs = PROVIDER_FIELD_DEFS.get(provider, {})
+    changed = False
+    if base_url and field_defs.get("WEB_SEARCH_BASE_URL") in ("required", "optional"):
+        _PROVIDER_SAVED.setdefault(provider, {})["WEB_SEARCH_BASE_URL"] = base_url
+        changed = True
+    if api_key and field_defs.get("WEB_SEARCH_API_KEY") in ("required", "optional"):
+        _PROVIDER_SAVED.setdefault(provider, {})["WEB_SEARCH_API_KEY"] = api_key
+        changed = True
+    if changed:
+        _save_provider_saved_to_file(_PROVIDER_SAVED)
+
+
+def get_provider_saved(provider: str, field: str) -> str:
+    return _PROVIDER_SAVED.get(provider, {}).get(field, "")
 
 _runtime_overrides: dict[str, Any] = {}
 
