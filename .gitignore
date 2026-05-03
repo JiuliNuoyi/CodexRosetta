@@ -9,3 +9,6 @@ audit/
 *.egg-info/
 dist/
 build/
+
+INSPECTION_REPORT.md
+UNHANDLED_PARAMS.md

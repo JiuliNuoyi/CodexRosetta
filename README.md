@@ -1,4 +1,4 @@
-﻿# CodexRosetta
+# CodexRosetta
 
 **Responses API <-> Chat Completions API 代理服务器**
 
@@ -23,7 +23,7 @@ docker run -d \
   --name codex-rosetta \
   -p 33131:33131 \
   -e UPSTREAM_API_KEY=sk-your-api-key \
-  ghcr.io/zhiyi-r/codex-rosetta:latest
+  ghcr.io/jiulinuoyi/codex-rosetta:latest
 ```
 
 然后将客户端指向 `http://localhost:33131/v1/responses`。
@@ -33,7 +33,7 @@ docker run -d \
 包含 Redis 用于会话状态持久化：
 
 ```bash
-git clone https://github.com/ZhiYi-R/CodexRosetta.git
+git clone https://github.com/JiuliNuoyi/CodexRosetta.git
 cd CodexRosetta
 cp .env.example .env
 # 编辑 .env，设置 UPSTREAM_API_KEY
@@ -50,7 +50,7 @@ UPSTREAM_API_KEY=sk-your-api-key codex-rosetta
 ### 从源码安装
 
 ```bash
-git clone https://github.com/ZhiYi-R/CodexRosetta.git
+git clone https://github.com/JiuliNuoyi/CodexRosetta.git
 cd CodexRosetta
 pip install .
 cp .env.example .env
