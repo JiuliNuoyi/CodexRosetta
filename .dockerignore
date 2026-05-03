@@ -1,0 +1,16 @@
+﻿__pycache__
+*.pyc
+*.pyo
+.env
+keys.json
+search_providers.json
+debug.log
+.claude
+.pytest_cache
+audit
+tests
+web/node_modules
+.git
+.gitignore
+INSPECTION_REPORT.md
+UNHANDLED_PARAMS.md

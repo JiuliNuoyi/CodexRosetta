@@ -2,7 +2,9 @@
 name = "codex-rosetta"
 version = "0.1.0"
 description = "Proxy server converting between OpenAI Responses API and Chat Completions API"
-readme = "README.md"
+readme = "README_CN.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

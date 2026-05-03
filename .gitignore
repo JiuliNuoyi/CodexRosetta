@@ -2,6 +2,10 @@
 *.pyc
 .env
 keys.json
+search_providers.json
 debug.log
 .claude/
 audit/
+*.egg-info/
+dist/
+build/

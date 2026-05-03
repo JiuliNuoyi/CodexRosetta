@@ -1,0 +1,36 @@
+﻿services:
+  codex-rosetta:
+    build: .
+    container_name: codex-rosetta
+    ports:
+      - "33131:33131"
+    environment:
+      - UPSTREAM_API_KEY=${UPSTREAM_API_KEY}
+      - UPSTREAM_BASE_URL=${UPSTREAM_BASE_URL:-https://api.openai.com/v1}
+      - UPSTREAM_PROVIDER=${UPSTREAM_PROVIDER:-openai}
+    volumes:
+      - ./data:/app/data
+      - ./keys.json:/app/keys.json
+      - ./search_providers.json:/app/search_providers.json
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    container_name: codex-rosetta-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
