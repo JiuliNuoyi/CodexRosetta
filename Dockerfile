@@ -1,4 +1,4 @@
-﻿# ---- Stage 1: Build frontend ----
+# ---- Stage 1: Build frontend ----
 FROM node:22-alpine AS web-builder
 
 WORKDIR /build/web
@@ -13,7 +13,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Copy project definition and source first
-COPY pyproject.toml README_CN.md LICENSE THIRD_PARTY_LICENSES.md ./
+COPY pyproject.toml README.md LICENSE THIRD_PARTY_LICENSES.md ./
 COPY codex_rosetta/ codex_rosetta/
 
 # Install (includes the package itself)
