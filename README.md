@@ -57,7 +57,7 @@ docker run -d \
 git clone https://github.com/JiuliNuoyi/CodexRosetta.git
 cd CodexRosetta
 cp .env.example .env
-# 编辑 .env，设置 UPSTREAM_API_KEY 和 UPSTREAM_BASE_URL
+# 编辑 .env，配置上游服务商
 docker compose up -d
 ```
 
@@ -65,7 +65,7 @@ docker compose up -d
 
 ```bash
 pip install codex-rosetta
-UPSTREAM_API_KEY=sk-your-api-key codex-rosetta
+codex-rosetta
 ```
 
 ### 从源码安装
@@ -75,7 +75,7 @@ git clone https://github.com/JiuliNuoyi/CodexRosetta.git
 cd CodexRosetta
 pip install .
 cp .env.example .env
-# 编辑 .env，设置 UPSTREAM_API_KEY
+# 编辑 .env，配置上游服务商
 codex-rosetta
 ```
 
