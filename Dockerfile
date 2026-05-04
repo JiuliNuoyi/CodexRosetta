@@ -16,11 +16,11 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_LICENSES.md ./
 COPY codex_rosetta/ codex_rosetta/
 
-# Install (includes the package itself)
-RUN pip install --no-cache-dir .
-
-# Copy built frontend from Stage 1
+# Copy built frontend from Stage 1 (needed by pip install due to force-include)
 COPY --from=web-builder /build/web/dist/ web/dist/
+
+# Install (includes the package itself and web/dist)
+RUN pip install --no-cache-dir .
 
 # Default environment
 ENV HOST=0.0.0.0
