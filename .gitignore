@@ -5,7 +5,7 @@ keys.json
 search_providers.json
 debug.log
 .claude/
-audit/
+audit/*.log
 *.egg-info/
 dist/
 build/
