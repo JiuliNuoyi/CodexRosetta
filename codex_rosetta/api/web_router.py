@@ -16,7 +16,21 @@ mimetypes.add_type("image/svg+xml", ".svg")
 mimetypes.add_type("application/font-woff2", ".woff2")
 mimetypes.add_type("application/font-woff", ".woff")
 
-WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "dist"
+# Look for web/dist in multiple locations:
+# 1. Inside package (pip installed)
+# 2. Project root relative to package (dev mode)
+# 3. Current working directory (Docker)
+_CANDIDATES = [
+    Path(__file__).resolve().parent.parent / "web" / "dist",  # codex_rosetta/web/dist
+    Path(__file__).resolve().parent.parent.parent / "web" / "dist",  # project_root/web/dist
+    Path.cwd() / "web" / "dist",
+]
+
+WEB_DIR: Path | None = None
+for _candidate in _CANDIDATES:
+    if _candidate.exists() and (_candidate / "index.html").exists():
+        WEB_DIR = _candidate
+        break
 
 MIME_MAP = {
     ".js": "application/javascript",
@@ -36,7 +50,7 @@ MIME_MAP = {
 
 def mount_webui(app: FastAPI) -> None:
     """Mount the WebUI SPA and static assets."""
-    if not WEB_DIR.exists():
+    if WEB_DIR is None:
         return
 
     index = WEB_DIR / "index.html"

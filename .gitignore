@@ -1,4 +1,4 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 .env
 keys.json
@@ -7,7 +7,7 @@ debug.log
 .claude/
 audit/*.log
 *.egg-info/
-dist/
+/dist/
 build/
 
 INSPECTION_REPORT.md
