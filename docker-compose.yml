@@ -1,6 +1,6 @@
 ﻿services:
   codex-rosetta:
-    image: ghcr.io/jiulinuoyi/codex-rosetta:latest
+    image: jlny/codex-rosetta:latest
     build: .
     container_name: codex-rosetta
     ports:
