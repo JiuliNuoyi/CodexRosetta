@@ -1,8 +1,7 @@
 __pycache__/
 *.pyc
 .env
-keys.json
-search_providers.json
+data/
 debug.log
 .claude/
 audit/*.log

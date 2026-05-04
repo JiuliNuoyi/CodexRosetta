@@ -238,7 +238,7 @@ codex_rosetta/
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `KEYS_FILE` | `./keys.json` | Key 存储文件路径 |
+| `KEYS_FILE` | `./data/keys.json` | Key 存储文件路径 |
 
 完整配置参考：[.env.example](.env.example)
 
@@ -254,7 +254,7 @@ Key 也可以通过 `/v1/keys` REST API 管理（支持 GET 列表、POST 添加
 
 ## 注意事项
 
-- **API Key 安全** — 上游 API Key 仅发送给配置的上游服务商。CodexRosetta 不会将其记录日志或传输到其他地方。`.env` 文件和 `keys.json` 应妥善保管并排除在版本控制之外。
+- **API Key 安全** — 上游 API Key 仅发送给配置的上游服务商。CodexRosetta 不会将其记录日志或传输到其他地方。`.env` 文件和 `data/keys.json` 应妥善保管并排除在版本控制之外。
 - **流式超时** — 默认读取超时为 300 秒。如果使用长时间运行的模型，可能需要增加 `UPSTREAM_TIMEOUT_READ`。
 - **上下文溢出自动重试** — `truncation=auto` 是客户端（如 Codex）在 Responses API 请求中传来的参数。由于 Chat Completions API 不支持此参数，CodexRosetta 在代理层接管了这个逻辑：当上游返回上下文长度错误时，自动裁剪较早的非系统消息（每次裁剪 1/4）并重试，最多 3 次。若客户端未传此参数，则超上下文直接报错。
 - **内置工具模拟范围** — Responses API 的内置工具均为 OpenAI 云端执行。目前仅 `web_search` 已通过第三方搜索服务实现本地替代，其余工具（`file_search`、`computer_use_preview`、`code_interpreter`、`image_generation`）暂时不可用，需等待上游模型商提供支持或后续更新。

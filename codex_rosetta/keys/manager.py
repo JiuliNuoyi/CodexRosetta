@@ -38,6 +38,7 @@ class KeyManager:
             self._entries = []
 
     def _save(self) -> None:
+        self._keys_file.parent.mkdir(parents=True, exist_ok=True)
         data = [item.model_dump() for item in self._entries]
         self._keys_file.write_text(
             json.dumps(data, indent=2, ensure_ascii=False) + "\n",

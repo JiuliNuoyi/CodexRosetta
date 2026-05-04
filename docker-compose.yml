@@ -11,8 +11,6 @@
       - UPSTREAM_PROVIDER=${UPSTREAM_PROVIDER:-openai}
     volumes:
       - ./data:/app/data
-      - ./keys.json:/app/keys.json
-      - ./search_providers.json:/app/search_providers.json
     env_file:
       - .env
     restart: unless-stopped

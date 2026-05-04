@@ -21,6 +21,7 @@ COPY --from=web-builder /build/web/dist/ web/dist/
 
 # Install (includes the package itself and web/dist)
 RUN pip install --no-cache-dir .
+RUN mkdir -p /app/data
 
 # Default environment
 ENV HOST=0.0.0.0

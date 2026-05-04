@@ -8,7 +8,7 @@ from typing import Any, Literal, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_FILE = ".env"
-_PROVIDERS_FILE = "search_providers.json"
+_PROVIDERS_FILE = "data/search_providers.json"
 
 
 class Settings(BaseSettings):
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     AUDIT_DIR: str = "./audit"
 
     # Keys management
-    KEYS_FILE: str = "./keys.json"
+    KEYS_FILE: str = "./data/keys.json"
 
     # Web Search
     WEB_SEARCH_ENABLED: bool = False
@@ -82,6 +82,7 @@ def _load_provider_saved() -> dict[str, dict[str, str]]:
 
 def _save_provider_saved_to_file(saved: dict[str, dict[str, str]]) -> None:
     path = Path(_PROVIDERS_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(saved, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
