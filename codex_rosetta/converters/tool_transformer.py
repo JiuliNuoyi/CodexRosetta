@@ -275,16 +275,19 @@ class ToolTransformer:
         }
 
     def _convert_custom_tool(self, tool: dict[str, Any]) -> dict[str, Any]:
-        """Convert a custom tool to Chat Completions format."""
+        """Convert a custom tool to Chat Completions function format.
+
+        Chat Completions API only supports ``type: "function"``. The previous
+        implementation returned ``type: "custom"`` which is not understood by
+        most upstream providers (e.g. litellm, vLLM) and causes 400 errors.
+        """
         custom = tool.get("custom", tool)
-        return {
-            "type": "custom",
-            "custom": {
-                "name": custom.get("name", ""),
-                "description": custom.get("description", ""),
-                "format": custom.get("format", {"type": "text"}),
-            },
+        func_def = {
+            "name": custom.get("name", "custom_tool"),
+            "description": custom.get("description", ""),
+            "parameters": {"type": "object", "properties": {}},
         }
+        return {"type": "function", "function": func_def}
 
     def convert_tool_choice(
         self, tool_choice: Any, context: ConversionContext
